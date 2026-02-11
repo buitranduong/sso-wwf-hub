@@ -1,0 +1,15 @@
+{
+    "name": "sso/proxy",
+    "description": "Lightweight OAuth 2.0 SSO proxy service",
+    "type": "project",
+    "require": {
+        "php": ">=8.2",
+        "ext-redis": "*",
+        "ext-json": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "SSO\\": "src/"
+        }
+    }
+}
