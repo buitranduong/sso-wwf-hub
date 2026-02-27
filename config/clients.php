@@ -1,15 +1,9 @@
 <?php
 
 return [
-    'legacy_ci_app' => [
+    'lta_wwfgm' => [
         'redirect_uris' => [
-            'https://old-app.company.com/auth/callback',
-            'https://old-app.company.com/auth/microsoft/callback',
+            'https://lta.wwfgm.org',
         ],
     ],
-    // 'another_app' => [
-    //     'redirect_uris' => [
-    //         'https://another-app.company.com/oauth/callback',
-    //     ],
-    // ],
 ];
