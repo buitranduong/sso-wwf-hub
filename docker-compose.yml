@@ -17,6 +17,8 @@ services:
     build: .
     expose:
       - "80"
+    volumes:
+      - ./config:/var/www/html/config:ro
     env_file:
       - .env
     environment:
