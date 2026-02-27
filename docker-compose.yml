@@ -1,9 +1,22 @@
 version: "3.9"
 services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      sso:
+        condition: service_healthy
+    restart: unless-stopped
+
   sso:
     build: .
-    ports:
-      - "8080:80"
+    expose:
+      - "80"
     env_file:
       - .env
     environment:
@@ -17,6 +30,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -26,3 +40,4 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
