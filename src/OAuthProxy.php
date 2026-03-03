@@ -218,14 +218,26 @@ abstract class OAuthProxy
      */
     public static function userinfoEndpoint(RedisState $stateStore, Logger $logger): void
     {
-        // Get access token from Authorization header or query param
+        // Get access token from Authorization header, Apache env, or query param
         $accessToken = '';
-        $authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+        $authHeader = '';
+        if (isset($_SERVER['HTTP_AUTHORIZATION'])) {
+            $authHeader = $_SERVER['HTTP_AUTHORIZATION'];
+        } elseif (isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+            $authHeader = $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
+        } elseif (function_exists('apache_request_headers')) {
+            $headers = apache_request_headers();
+            if (isset($headers['Authorization'])) {
+                $authHeader = $headers['Authorization'];
+            } elseif (isset($headers['authorization'])) {
+                $authHeader = $headers['authorization'];
+            }
+        }
         if (preg_match('/^Bearer\s+(.+)$/i', $authHeader, $matches)) {
             $accessToken = $matches[1];
         }
         if (empty($accessToken)) {
-            $accessToken = $_GET['access_token'] ?? '';
+            $accessToken = isset($_GET['access_token']) ? $_GET['access_token'] : '';
         }
 
         if (empty($accessToken)) {
