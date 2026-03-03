@@ -50,6 +50,11 @@ class MicrosoftProxy extends OAuthProxy
     {
         $user = $this->httpGetWithToken('https://graph.microsoft.com/v1.0/me', $accessToken);
 
+        $this->logger->error('Microsoft Graph /me response', [
+            'response' => $user,
+            'token_prefix' => substr($accessToken, 0, 20),
+        ]);
+
         if (!$user || isset($user['error'])) {
             return null;
         }
