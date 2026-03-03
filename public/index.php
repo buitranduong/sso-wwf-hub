@@ -4,6 +4,7 @@ require __DIR__ . '/../vendor/autoload.php';
 
 use SSO\GoogleProxy;
 use SSO\MicrosoftProxy;
+use SSO\OAuthProxy;
 use SSO\RedisState;
 use SSO\Logger;
 use SSO\JsonResponse;
@@ -33,6 +34,16 @@ try {
             break;
         case '/microsoft/callback':
             (new MicrosoftProxy($stateStore, $logger))->callback();
+            break;
+
+        // Client exchanges wrapped code for token (proxied to provider)
+        case '/token':
+            OAuthProxy::tokenEndpoint($stateStore, $logger);
+            break;
+
+        // Client fetches user info with access_token (proxied to provider)
+        case '/userinfo':
+            OAuthProxy::userinfoEndpoint($stateStore, $logger);
             break;
 
         case '/health':

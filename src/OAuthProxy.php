@@ -26,6 +26,17 @@ abstract class OAuthProxy
 
     abstract protected function getCallbackPath(): string;
 
+    /**
+     * Exchange authorization code with the provider's token endpoint.
+     */
+    abstract protected function exchangeCodeWithProvider(string $code): ?array;
+
+    /**
+     * Fetch user info from the provider using access token.
+     * Returns normalized array in Google-compatible format.
+     */
+    abstract protected function fetchUserInfoFromProvider(string $accessToken): ?array;
+
     public function auth(): void
     {
         $clientId    = $_GET['client_id'] ?? '';
@@ -63,6 +74,10 @@ abstract class OAuthProxy
         exit;
     }
 
+    /**
+     * Callback from provider: wrap the code with provider info and redirect to client.
+     * The wrapped_code is stored in Redis so /token knows which provider to call.
+     */
     public function callback(): void
     {
         $state = $_GET['state'] ?? '';
@@ -102,13 +117,206 @@ abstract class OAuthProxy
 
         $redirectUri = $data['redirect_uri'];
 
-        $this->logger->info('Proxying auth code to client', [
+        // Store original code + provider in Redis with a wrapped code
+        // So when client calls /token, we know which provider to exchange with
+        $wrappedCode = bin2hex(random_bytes(32));
+        $this->stateStore->setCodeMapping($wrappedCode, [
+            'provider'      => $this->getProviderName(),
+            'original_code' => $code,
+            'client_id'     => $data['client_id'],
+        ]);
+
+        $this->logger->info('Wrapping auth code and redirecting to client', [
             'provider'  => $this->getProviderName(),
             'client_id' => $data['client_id'],
         ]);
 
+        // Redirect to client with wrapped code (same as before, client sees ?code=xxx)
         $separator = str_contains($redirectUri, '?') ? '&' : '?';
-        header('Location: ' . $redirectUri . $separator . 'code=' . urlencode($code));
+        header('Location: ' . $redirectUri . $separator . 'code=' . urlencode($wrappedCode));
         exit;
+    }
+
+    /**
+     * /token endpoint: Client exchanges wrapped code → SSO Hub exchanges with provider → returns token.
+     * Response format is Google-compatible.
+     */
+    public static function tokenEndpoint(RedisState $stateStore, Logger $logger): void
+    {
+        // Accept both POST (standard) and GET
+        $code = $_POST['code'] ?? $_GET['code'] ?? '';
+
+        if (empty($code)) {
+            JsonResponse::error(400, 'invalid_request', 'Missing code parameter');
+        }
+
+        // Look up the wrapped code
+        $mapping = $stateStore->getCodeMapping($code);
+        if (!$mapping) {
+            $logger->warning('Invalid or expired wrapped code', ['code' => substr($code, 0, 8) . '...']);
+            JsonResponse::error(400, 'invalid_grant', 'Code is invalid or expired');
+        }
+
+        // Delete immediately (one-time use)
+        $stateStore->deleteCodeMapping($code);
+
+        $providerName = $mapping['provider'];
+        $originalCode = $mapping['original_code'];
+
+        // Create the correct proxy based on provider
+        $providers = require __DIR__ . '/../config/providers.php';
+        $proxy = match ($providerName) {
+            'google'    => new \SSO\GoogleProxy($stateStore, $logger),
+            'microsoft' => new \SSO\MicrosoftProxy($stateStore, $logger),
+            default     => null,
+        };
+
+        if (!$proxy) {
+            JsonResponse::error(400, 'invalid_provider', 'Unknown provider: ' . $providerName);
+        }
+
+        // Exchange original code with the real provider
+        $tokenResponse = $proxy->exchangeCodeWithProvider($originalCode);
+
+        if (!$tokenResponse || isset($tokenResponse['error'])) {
+            $logger->error('Token exchange with provider failed', [
+                'provider' => $providerName,
+                'error'    => $tokenResponse['error'] ?? 'unknown',
+            ]);
+            JsonResponse::error(502, 'token_exchange_failed',
+                $tokenResponse['error_description'] ?? 'Failed to exchange code with provider');
+        }
+
+        // Store access_token → provider mapping so /userinfo knows which provider to call
+        $accessToken = $tokenResponse['access_token'] ?? '';
+        if ($accessToken) {
+            $ttl = $tokenResponse['expires_in'] ?? 3600;
+            $stateStore->setTokenProvider($accessToken, [
+                'provider' => $providerName,
+            ], (int) $ttl);
+        }
+
+        $logger->info('Token exchanged successfully', [
+            'provider' => $providerName,
+        ]);
+
+        // Return token response in Google-compatible format
+        JsonResponse::success([
+            'access_token'  => $tokenResponse['access_token'] ?? '',
+            'token_type'    => $tokenResponse['token_type'] ?? 'Bearer',
+            'expires_in'    => $tokenResponse['expires_in'] ?? 3600,
+            'refresh_token' => $tokenResponse['refresh_token'] ?? null,
+            'id_token'      => $tokenResponse['id_token'] ?? null,
+            'scope'         => $tokenResponse['scope'] ?? '',
+            'provider'      => $providerName,
+        ]);
+    }
+
+    /**
+     * /userinfo endpoint: Client sends access_token → SSO Hub fetches from provider → returns user info.
+     * Response format is Google-compatible (same fields as Google OAuth2 userinfo).
+     */
+    public static function userinfoEndpoint(RedisState $stateStore, Logger $logger): void
+    {
+        // Get access token from Authorization header or query param
+        $accessToken = '';
+        $authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+        if (preg_match('/^Bearer\s+(.+)$/i', $authHeader, $matches)) {
+            $accessToken = $matches[1];
+        }
+        if (empty($accessToken)) {
+            $accessToken = $_GET['access_token'] ?? '';
+        }
+
+        if (empty($accessToken)) {
+            JsonResponse::error(401, 'invalid_request', 'Missing access_token (use Authorization: Bearer header or access_token param)');
+        }
+
+        // Look up which provider this token belongs to
+        $tokenData = $stateStore->getTokenProvider($accessToken);
+        if (!$tokenData) {
+            $logger->warning('Unknown access_token for userinfo');
+            JsonResponse::error(401, 'invalid_token', 'Access token is not recognized. Call /token first.');
+        }
+
+        $providerName = $tokenData['provider'];
+
+        $proxy = match ($providerName) {
+            'google'    => new \SSO\GoogleProxy($stateStore, $logger),
+            'microsoft' => new \SSO\MicrosoftProxy($stateStore, $logger),
+            default     => null,
+        };
+
+        if (!$proxy) {
+            JsonResponse::error(400, 'invalid_provider', 'Unknown provider');
+        }
+
+        $userInfo = $proxy->fetchUserInfoFromProvider($accessToken);
+
+        if (!$userInfo || isset($userInfo['error'])) {
+            $logger->error('Failed to fetch userinfo from provider', [
+                'provider' => $providerName,
+            ]);
+            JsonResponse::error(502, 'userinfo_failed', 'Failed to fetch user info from provider');
+        }
+
+        $logger->info('User info fetched successfully', [
+            'provider' => $providerName,
+            'email'    => $userInfo['email'] ?? 'unknown',
+        ]);
+
+        // Return in Google OAuth2 userinfo format
+        JsonResponse::success($userInfo);
+    }
+
+    /**
+     * Helper: HTTP POST request.
+     */
+    protected function httpPost(string $url, array $params, array $headers = []): ?array
+    {
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($params));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+
+        if ($headers) {
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        }
+
+        $response = curl_exec($ch);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        if ($error) {
+            $this->logger->error('HTTP POST failed', ['url' => $url, 'error' => $error]);
+            return null;
+        }
+
+        return json_decode($response, true) ?: null;
+    }
+
+    /**
+     * Helper: HTTP GET with Bearer token.
+     */
+    protected function httpGetWithToken(string $url, string $token): ?array
+    {
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer ' . $token]);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+
+        $response = curl_exec($ch);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        if ($error) {
+            $this->logger->error('HTTP GET failed', ['url' => $url, 'error' => $error]);
+            return null;
+        }
+
+        return json_decode($response, true) ?: null;
     }
 }

@@ -30,4 +30,41 @@ class MicrosoftProxy extends OAuthProxy
 
         return $authUrl . '?' . $params;
     }
+
+    public function exchangeCodeWithProvider(string $code): ?array
+    {
+        $tenantId = $this->providerConfig['tenant_id'] ?? 'common';
+        $tokenUrl = sprintf($this->providerConfig['token_url'], $tenantId);
+
+        return $this->httpPost($tokenUrl, [
+            'client_id'     => $this->providerConfig['client_id'],
+            'client_secret' => $this->providerConfig['client_secret'],
+            'code'          => $code,
+            'redirect_uri'  => $this->baseUrl . $this->getCallbackPath(),
+            'grant_type'    => 'authorization_code',
+            'scope'         => $this->providerConfig['scope'],
+        ]);
+    }
+
+    public function fetchUserInfoFromProvider(string $accessToken): ?array
+    {
+        $user = $this->httpGetWithToken('https://graph.microsoft.com/v1.0/me', $accessToken);
+
+        if (!$user || isset($user['error'])) {
+            return null;
+        }
+
+        // Return in Google OAuth2 userinfo-compatible format
+        return [
+            'id'             => $user['id'] ?? '',
+            'email'          => $user['mail'] ?? $user['userPrincipalName'] ?? '',
+            'verified_email' => true,
+            'name'           => $user['displayName'] ?? '',
+            'given_name'     => $user['givenName'] ?? '',
+            'family_name'    => $user['surname'] ?? '',
+            'picture'        => '',
+            'locale'         => $user['preferredLanguage'] ?? '',
+            'provider'       => 'microsoft',
+        ];
+    }
 }
