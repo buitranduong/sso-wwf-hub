@@ -15,6 +15,6 @@ return [
         'tenant_id'     => getenv('MICROSOFT_TENANT_ID') ?: 'common',
         'auth_url'      => 'https://login.microsoftonline.com/%s/oauth2/v2.0/authorize',
         'token_url'     => 'https://login.microsoftonline.com/%s/oauth2/v2.0/token',
-        'scope'         => 'openid email profile',
+        'scope'         => 'openid email profile User.Read',
     ],
 ];
